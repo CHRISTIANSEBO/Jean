@@ -150,7 +150,7 @@ class TestSortEmails:
 # ---------------------------------------------------------------------------
 
 class TestUnsubscribeFromEmail:
-    def _call(self, sender, messages=None, headers=None):
+    def _call(self, sender, messages=None, headers=None, confirm="y"):
         mock_service = MagicMock()
         mock_service.users().messages().list().execute.return_value = {
             "messages": messages or []
@@ -159,7 +159,8 @@ class TestUnsubscribeFromEmail:
             mock_service.users().messages().get().execute.return_value = {
                 "payload": {"headers": headers}
             }
-        with patch("agent.tools._get_service", return_value=mock_service):
+        with patch("agent.tools._get_service", return_value=mock_service), \
+             patch("builtins.input", return_value=confirm):
             from agent.tools import unsubscribe_from_email
             return unsubscribe_from_email.invoke({"sender_email": sender})
 
@@ -190,7 +191,8 @@ class TestUnsubscribeFromEmail:
             }
         }
         mock_service.users().messages().send().execute.return_value = {}
-        with patch("agent.tools._get_service", return_value=mock_service):
+        with patch("agent.tools._get_service", return_value=mock_service), \
+             patch("builtins.input", return_value="y"):
             from agent.tools import unsubscribe_from_email
             result = unsubscribe_from_email.invoke({"sender_email": "sender@example.com"})
         assert "Unsubscribe email sent" in result
@@ -204,3 +206,19 @@ class TestUnsubscribeFromEmail:
             ],
         )
         assert "https://example.com/unsub" in result
+
+    def test_url_unsubscribe_cancelled(self):
+        mock_service = MagicMock()
+        mock_service.users().messages().list().execute.return_value = {"messages": [{"id": "1"}]}
+        mock_service.users().messages().get().execute.return_value = {
+            "payload": {
+                "headers": [
+                    {"name": "List-Unsubscribe", "value": "<https://example.com/unsub>"}
+                ]
+            }
+        }
+        with patch("agent.tools._get_service", return_value=mock_service), \
+             patch("builtins.input", return_value="n"):
+            from agent.tools import unsubscribe_from_email
+            result = unsubscribe_from_email.invoke({"sender_email": "sender@example.com"})
+        assert result == "Unsubscribe cancelled by user."
