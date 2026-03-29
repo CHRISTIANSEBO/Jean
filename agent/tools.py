@@ -8,15 +8,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from googleapiclient.discovery import build as _build_service
 from agent.file_handler import _load_credentials
 
-# Load credentials once at startup. Building a new httplib2-backed service
-# per thread is thread-safe; sharing one service across threads is not.
-_credentials = _load_credentials()
 _thread_local = threading.local()
 
 def _get_service():
-    """Return a thread-local Gmail service built from the shared credentials."""
+    """Return a thread-local Gmail service, loading credentials on first call."""
     if not hasattr(_thread_local, 'service'):
-        _thread_local.service = _build_service('gmail', 'v1', credentials=_credentials)
+        _thread_local.service = _build_service('gmail', 'v1', credentials=_load_credentials())
     return _thread_local.service
 
 
