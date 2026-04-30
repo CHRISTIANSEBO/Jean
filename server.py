@@ -1,18 +1,31 @@
 import json
 import os
 import queue
+import secrets
 import sqlite3
 import threading
 import uuid
 from pathlib import Path
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify, Response, stream_with_context, redirect, session
 from langchain_core.messages import AIMessageChunk, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from agent.assistant import create_agent
+from agent.file_handler import (
+    is_authenticated, create_web_flow, get_user_profile,
+    _load_credentials, _TOKEN_PATH,
+)
 import builtins as _builtins
 import anthropic as _anthropic
 
+# Required for OAuth over plain HTTP on localhost
+os.environ.setdefault('OAUTHLIB_INSECURE_TRANSPORT', '1')
+
 app = Flask(__name__)
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'jean-dev-secret-key')
+
+_CALLBACK_URL  = 'http://localhost:5000/auth/callback'
+_FRONTEND_URL  = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+_oauth_states: dict[str, str | None] = {}  # state -> code_verifier
 checkpointer = MemorySaver()
 agent = create_agent(checkpointer=checkpointer)
 
@@ -296,6 +309,57 @@ def _wait_for_agent() -> dict:
     finally:
         timer.cancel()
     return {'type': 'message', 'reply': 'Request timed out. Please try again.'}
+
+
+# ── Auth routes ───────────────────────────────────────────────────────────────
+
+@app.route('/auth/status')
+def auth_status():
+    return jsonify({'authenticated': is_authenticated()})
+
+
+@app.route('/auth/login')
+def auth_login():
+    state = secrets.token_urlsafe(16)
+    flow = create_web_flow(_CALLBACK_URL)
+    auth_url, _ = flow.authorization_url(
+        prompt='consent', access_type='offline', state=state
+    )
+    # Store code_verifier so the callback can pass it to fetch_token (PKCE)
+    _oauth_states[state] = getattr(flow, 'code_verifier', None)
+    return jsonify({'url': auth_url})
+
+
+@app.route('/auth/callback')
+def auth_callback():
+    state = request.args.get('state', '')
+    if state not in _oauth_states:
+        return 'Invalid or expired auth state.', 400
+    code_verifier = _oauth_states.pop(state)
+    flow = create_web_flow(_CALLBACK_URL)
+    try:
+        extra = {'code_verifier': code_verifier} if code_verifier else {}
+        flow.fetch_token(authorization_response=request.url, **extra)
+    except Exception as e:
+        return f'Auth error: {e}', 400
+    with open(_TOKEN_PATH, 'w') as f:
+        f.write(flow.credentials.to_json())
+    return redirect(_FRONTEND_URL)
+
+
+@app.route('/auth/logout', methods=['POST'])
+def auth_logout():
+    _TOKEN_PATH.unlink(missing_ok=True)
+    return jsonify({'ok': True})
+
+
+@app.route('/auth/profile')
+def auth_profile():
+    try:
+        creds = _load_credentials()
+        return jsonify(get_user_profile(creds))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 401
 
 
 # ── DB routes ─────────────────────────────────────────────────────────────────

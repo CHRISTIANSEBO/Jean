@@ -12,6 +12,7 @@ export default defineConfig({
       '/stream':  'http://127.0.0.1:5000',
       '/inbox':   'http://127.0.0.1:5000',
       '/templates': 'http://127.0.0.1:5000',
+      '/auth':    'http://127.0.0.1:5000',
     }
   }
 })

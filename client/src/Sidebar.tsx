@@ -2,6 +2,12 @@ import { useState } from 'react';
 import type { TemplateItem, RecentChat } from './StaggeredMenu';
 import './Sidebar.css';
 
+export interface UserProfile {
+  name: string;
+  email: string;
+  picture: string;
+}
+
 interface SidebarProps {
   collapsed: boolean;
   onToggle: () => void;
@@ -16,6 +22,8 @@ interface SidebarProps {
   searchQuery: string;
   onSearchChange: (q: string) => void;
   onNewChat: () => void;
+  profile: UserProfile | null;
+  onSignOut: () => void;
 }
 
 const NAV = [
@@ -31,6 +39,7 @@ const NAV = [
 export default function Sidebar({
   collapsed, onToggle, onFetchInbox, onCompose, templates, onUseTemplate, onDeleteTemplate,
   recentChats, onLoadChat, onDeleteChat, searchQuery, onSearchChange, onNewChat,
+  profile, onSignOut,
 }: SidebarProps) {
   const [templatesOpen, setTemplatesOpen] = useState(true);
   const [recentsOpen, setRecentsOpen] = useState(true);
@@ -112,6 +121,44 @@ export default function Sidebar({
               ))}
             </div>
           )}
+        </>
+      )}
+      {/* Profile / sign-out */}
+      {profile && (
+        <>
+          <div className="sidebar-divider" />
+          <div className={`sidebar-profile${collapsed ? ' collapsed' : ''}`}>
+            <div className="sidebar-avatar-wrap">
+              {profile.picture ? (
+                <img
+                  src={profile.picture}
+                  alt={profile.name}
+                  className="sidebar-avatar-img"
+                  referrerPolicy="no-referrer"
+                  onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                />
+              ) : (
+                <span className="sidebar-avatar-initials">
+                  {profile.name ? profile.name[0].toUpperCase() : '?'}
+                </span>
+              )}
+            </div>
+            {!collapsed && (
+              <div className="sidebar-profile-info">
+                <span className="sidebar-profile-name">{profile.name || 'My account'}</span>
+                <span className="sidebar-profile-email">{profile.email}</span>
+              </div>
+            )}
+            {!collapsed && (
+              <button type="button" className="sidebar-signout-btn" onClick={onSignOut} title="Sign out">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                  <polyline points="16 17 21 12 16 7"/>
+                  <line x1="21" y1="12" x2="9" y2="12"/>
+                </svg>
+              </button>
+            )}
+          </div>
         </>
       )}
     </aside>

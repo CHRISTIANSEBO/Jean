@@ -7,7 +7,9 @@ import EmailCards from './EmailCards';
 import type { EmailData } from './EmailCards';
 import ComposePanel from './ComposePanel';
 import UnsubView from './UnsubView';
+import LoginPage from './LoginPage';
 import type { UnsubSender } from './UnsubView';
+import type { UserProfile } from './Sidebar';
 import type { TemplateItem, RecentChat } from './StaggeredMenu';
 import './App.css';
 
@@ -131,6 +133,8 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [inboxView, setInboxView]               = useState<InboxView | null>(null);
   const [unsubView, setUnsubView]               = useState<UnsubViewState | null>(null);
+  const [isAuthenticated, setIsAuthenticated]   = useState<boolean | null>(null);
+  const [profile, setProfile]                   = useState<UserProfile | null>(null);
 
   const chatIdRef       = useRef<string | null>(null);
   const threadIdRef     = useRef<string | null>(null);
@@ -149,6 +153,20 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    fetch('/auth/status')
+      .then(r => r.json())
+      .then(d => {
+        setIsAuthenticated(d.authenticated);
+        if (d.authenticated) {
+          fetch('/auth/profile').then(r => r.json()).then(p => {
+            if (!p.error) setProfile(p);
+          }).catch(() => {});
+        }
+      })
+      .catch(() => setIsAuthenticated(false));
+  }, []);
+
+  useEffect(() => {
     fetch('/chats').then(r => r.json()).then((d: RecentChat[]) => setRecentChats(d)).catch(() => {});
   }, []);
 
@@ -164,6 +182,12 @@ export default function App() {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
     if (undoIntervalRef.current) clearInterval(undoIntervalRef.current);
   }, []);
+
+  const signOut = async () => {
+    await fetch('/auth/logout', { method: 'POST' });
+    setIsAuthenticated(false);
+    setProfile(null);
+  };
 
   const fetchTemplates = () => {
     fetch('/templates').then(r => r.json()).then(setTemplates).catch(() => {});
@@ -465,6 +489,9 @@ export default function App() {
 
   const isEmpty = messages.length === 0 && !loading && !streamingText && streamingEmails.length === 0 && inboxView === null && unsubView === null;
 
+  if (isAuthenticated === null) return null;
+  if (!isAuthenticated) return <LoginPage />;
+
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="app-layout">
@@ -475,6 +502,8 @@ export default function App() {
         onToggle={() => setSidebarCollapsed(c => !c)}
         onFetchInbox={fetchInbox}
         onCompose={() => setComposeOpen(true)}
+        profile={profile}
+        onSignOut={signOut}
         templates={templates}
         onUseTemplate={useTemplate}
         onDeleteTemplate={deleteTemplate}
