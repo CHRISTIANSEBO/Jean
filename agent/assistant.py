@@ -40,9 +40,12 @@ Always refer to yourself as Jean."""
 # Function to create and return a LangGraph ReAct agent
 def create_agent(checkpointer=None):
     """Create and return a LangGraph ReAct agent."""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set.")
     llm = ChatAnthropic(
         model="claude-haiku-4-5-20251001",
-        api_key=os.getenv("ANTHROPIC_API_KEY")
+        api_key=api_key,
     )
 
     tools = [read_email, send_email, sort_emails, unsubscribe_from_email, open_email, summarize_email, save_template]
