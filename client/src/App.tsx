@@ -163,7 +163,10 @@ export default function App() {
         setIsAuthenticated(d.authenticated);
         if (d.authenticated) {
           fetch('/auth/profile').then(r => r.json()).then(p => {
-            if (!p.error) setProfile(p);
+            if (!p.error) {
+              setProfile(p);
+              if (p.is_admin) setAdminOpen(true);
+            }
           }).catch(() => {});
         }
       })
@@ -500,7 +503,6 @@ export default function App() {
   return (
     <div className="app-layout">
       <ComposePanel open={composeOpen} onClose={() => setComposeOpen(false)} onSend={handleComposeSend} />
-      <AdminPanel open={adminOpen} onClose={() => setAdminOpen(false)} />
 
       {mobileSidebarOpen && (
         <div className="sidebar-overlay" onClick={() => setMobileSidebarOpen(false)} aria-hidden="true" />
@@ -531,6 +533,9 @@ export default function App() {
           <DarkVeil speed={0.5} />
         </div>
 
+        {adminOpen ? (
+          <AdminPanel onClose={() => setAdminOpen(false)} />
+        ) : (
         <div className="chat-area">
           <button
             type="button"
@@ -716,6 +721,7 @@ export default function App() {
             </>
           )}
         </div>
+        )}
       </main>
     </div>
   );

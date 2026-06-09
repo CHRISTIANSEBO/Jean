@@ -11,7 +11,6 @@ interface AdminUser {
 }
 
 interface AdminPanelProps {
-  open: boolean;
   onClose: () => void;
 }
 
@@ -20,15 +19,12 @@ function formatDate(ts: number): string {
   return new Date(ts * 1000).toLocaleString();
 }
 
-export default function AdminPanel({ open, onClose }: AdminPanelProps) {
+export default function AdminPanel({ onClose }: AdminPanelProps) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!open) return;
-    setLoading(true);
-    setError(null);
     fetch('/admin/users')
       .then(r => {
         if (!r.ok) throw new Error('Failed to load users');
@@ -37,25 +33,31 @@ export default function AdminPanel({ open, onClose }: AdminPanelProps) {
       .then(setUsers)
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-  }, [open]);
-
-  if (!open) return null;
+  }, []);
 
   return (
-    <div className="admin-overlay" onClick={onClose}>
-      <div className="admin-panel" onClick={e => e.stopPropagation()}>
-        <div className="admin-header">
-          <span className="admin-title">Connected users</span>
-          <button type="button" className="admin-close" onClick={onClose}>×</button>
-        </div>
+    <div className="admin-view">
+      <div className="admin-view-hdr">
+        <span className="inbox-view-label">Admin · Connected users</span>
+        {!loading && !error && (
+          <span className="inbox-view-count">
+            {users.length > 0 ? `${users.length} users` : 'None yet'}
+          </span>
+        )}
+        <button type="button" className="admin-back-btn" onClick={onClose}>
+          Back to inbox
+        </button>
+      </div>
 
-        <div className="admin-body">
-          {loading && <div className="admin-empty">Loading…</div>}
-          {error && <div className="admin-empty admin-error">{error}</div>}
-          {!loading && !error && users.length === 0 && (
-            <div className="admin-empty">No connected users yet.</div>
-          )}
-          {!loading && !error && users.map(u => (
+      {loading && <div className="inbox-view-empty">Loading…</div>}
+      {error && <div className="inbox-view-empty admin-error">{error}</div>}
+      {!loading && !error && users.length === 0 && (
+        <div className="inbox-view-empty">No connected users yet.</div>
+      )}
+
+      {!loading && !error && users.length > 0 && (
+        <div className="admin-list">
+          {users.map(u => (
             <div key={u.id} className="admin-row">
               <div className="admin-avatar-wrap">
                 {u.picture ? (
@@ -75,7 +77,7 @@ export default function AdminPanel({ open, onClose }: AdminPanelProps) {
             </div>
           ))}
         </div>
-      </div>
+      )}
     </div>
   );
 }
