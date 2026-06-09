@@ -1,3 +1,5 @@
+import base64
+import os
 from pathlib import Path
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -13,8 +15,26 @@ SCOPES = [
 
 # Paths resolved relative to this file, not the working directory
 _BASE_DIR = Path(__file__).parent.parent
-_TOKEN_PATH = _BASE_DIR / 'token.json'
+# In production (Railway) token.json lives on the persistent volume at /data
+# so it survives redeploys. Fall back to project root for local dev.
+_DATA_DIR = Path('/data') if Path('/data').exists() else _BASE_DIR
+_TOKEN_PATH = _DATA_DIR / 'token.json'
 _CREDENTIALS_PATH = _BASE_DIR / 'credentials.json'
+
+
+def _ensure_credentials_file() -> None:
+    """Write credentials.json from GOOGLE_CREDENTIALS_B64 env var if the file is absent.
+    This lets Railway (and other cloud hosts) inject the file via a secret env var
+    instead of baking it into the image or mounting a volume."""
+    if _CREDENTIALS_PATH.exists():
+        return
+    b64 = os.getenv('GOOGLE_CREDENTIALS_B64', '').strip()
+    if not b64:
+        return
+    _CREDENTIALS_PATH.write_bytes(base64.b64decode(b64))
+
+
+_ensure_credentials_file()
 
 def _load_credentials() -> Credentials:
     """Load, refresh, and return OAuth credentials. Does not build a service."""

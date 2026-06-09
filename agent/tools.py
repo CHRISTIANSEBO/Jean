@@ -17,6 +17,15 @@ def _get_service():
     return _thread_local.service
 
 
+def _tool_input(prompt: str = '') -> str:
+    """Thread-local input override. Set _thread_local.input_fn on the agent thread
+    to intercept confirmation prompts without touching the process-wide builtins.input."""
+    fn = getattr(_thread_local, 'input_fn', None)
+    if fn is not None:
+        return fn(prompt)
+    return input(prompt)
+
+
 def _extract_body(payload: dict) -> str:
     """Recursively extract plain-text body from a Gmail message payload."""
     mime_type = payload.get('mimeType', '')
@@ -54,10 +63,7 @@ def _fetch_one(msg_id: str) -> dict:
 def _fetch_one_headers(msg_id: str) -> dict:
     """Fetch subject, sender, and attachment names for a single message ID."""
     svc = _get_service()
-    msg_data = svc.users().messages().get(
-        userId='me', id=msg_id, format='metadata',
-        metadataHeaders=['Subject', 'From']
-    ).execute()
+    msg_data = svc.users().messages().get(userId='me', id=msg_id, format='full').execute()
     headers = msg_data['payload']['headers']
 
     attachments = []
@@ -131,7 +137,7 @@ def send_email(to, subject, body):
     """send an email using gmail."""
     if not _EMAIL_RE.match(to):
         return f"Invalid recipient email address: {to}"
-    confirm = input(f"Send this email?\n\nTo: {to}\nSubject: {subject}\n\n{body}").strip().lower()
+    confirm = _tool_input(f"Send this email?\n\nTo: {to}\nSubject: {subject}\n\n{body}").strip().lower()
     if confirm != 'y':
         return "Email cancelled by user."
     # Create the email message
@@ -198,7 +204,7 @@ def unsubscribe_from_email(sender_email: str):
                 address = unsubscribe_address
                 subject = 'Unsubscribe'
 
-            confirm = input(
+            confirm = _tool_input(
                 f"Send unsubscribe email to {address} with subject '{subject}'?"
             ).strip().lower()
             if confirm != 'y':
@@ -212,7 +218,7 @@ def unsubscribe_from_email(sender_email: str):
 
         url_match = re.search(r'<(https?://[^>]+)>', unsubscribe_header)
         if url_match:
-            confirm = input(
+            confirm = _tool_input(
                 f"Unsubscribe from {sender_email} via URL?\n{url_match.group(1)}"
             ).strip().lower()
             if confirm != 'y':
@@ -246,7 +252,7 @@ def open_email(sender_email: str, subject_hint: str = ''):
     subject = next((h['value'] for h in headers if h['name'] == 'Subject'), '(no subject)')
     sender = next((h['value'] for h in headers if h['name'] == 'From'), '(unknown)')
 
-    confirm = input(f"Open this email?\n\nFrom: {sender}\nSubject: {subject}").strip().lower()
+    confirm = _tool_input(f"Open this email?\n\nFrom: {sender}\nSubject: {subject}").strip().lower()
     if confirm != 'y':
         return "User declined to open the email."
 
