@@ -10,9 +10,9 @@ RUN npm run build
 FROM python:3.11-slim
 WORKDIR /app
 
-# Install Python deps
+# Install Python deps (including gunicorn for production)
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
 # Copy application code
 COPY agent/ ./agent/
@@ -21,10 +21,15 @@ COPY server.py main.py ./
 # Copy built frontend from stage 1
 COPY --from=frontend-builder /app/client/dist ./client/dist
 
+# /data is the mount point for Railway's persistent volume.
+# token.json and chats.db live here so they survive redeploys.
+RUN mkdir -p /data
+
 # Non-root user for security
-RUN useradd -m appuser && chown -R appuser /app
+RUN useradd -m appuser && chown -R appuser /app /data
 USER appuser
 
 EXPOSE 5000
 
-CMD ["python", "server.py"]
+# Use gunicorn in production; falls back gracefully if PORT is unset
+CMD gunicorn --bind 0.0.0.0:${PORT:-5000} --workers 1 --threads 4 --timeout 120 server:app

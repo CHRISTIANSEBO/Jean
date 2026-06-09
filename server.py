@@ -58,7 +58,8 @@ _OAUTH_STATE_TTL = 600  # 10 minutes
 checkpointer = MemorySaver()
 agent = create_agent(checkpointer=checkpointer)
 
-_DB_PATH = Path(__file__).parent / 'chats.db'
+_DATA_DIR = Path('/data') if Path('/data').exists() else Path(__file__).parent
+_DB_PATH = _DATA_DIR / 'chats.db'
 
 
 def _db():
@@ -747,4 +748,5 @@ if _DIST.exists():
 
 
 if __name__ == '__main__':
-    app.run(debug=False, use_reloader=False, threaded=True, port=5000)
+    port = int(os.getenv('PORT', 5000))
+    app.run(debug=False, use_reloader=False, threaded=True, host='0.0.0.0', port=port)
