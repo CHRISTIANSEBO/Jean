@@ -6,6 +6,7 @@ export interface UserProfile {
   name: string;
   email: string;
   picture: string;
+  is_admin?: boolean;
 }
 
 interface SidebarProps {
@@ -25,6 +26,7 @@ interface SidebarProps {
   onNewChat: () => void;
   profile: UserProfile | null;
   onSignOut: () => void;
+  onOpenAdmin?: () => void;
 }
 
 const NAV = [
@@ -40,7 +42,7 @@ const NAV = [
 export default function Sidebar({
   collapsed, onToggle: _onToggle, mobileOpen = false, onFetchInbox, onCompose, templates, onUseTemplate, onDeleteTemplate,
   recentChats, onLoadChat, onDeleteChat, searchQuery, onSearchChange, onNewChat,
-  profile, onSignOut,
+  profile, onSignOut, onOpenAdmin,
 }: SidebarProps) {
   const [templatesOpen, setTemplatesOpen] = useState(true);
   const [recentsOpen, setRecentsOpen] = useState(true);
@@ -149,6 +151,13 @@ export default function Sidebar({
                 <span className="sidebar-profile-name">{profile.name || 'My account'}</span>
                 <span className="sidebar-profile-email">{profile.email}</span>
               </div>
+            )}
+            {!collapsed && profile.is_admin && onOpenAdmin && (
+              <button type="button" className="sidebar-signout-btn" onClick={onOpenAdmin} title="Admin">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/>
+                </svg>
+              </button>
             )}
             {!collapsed && (
               <button type="button" className="sidebar-signout-btn" onClick={onSignOut} title="Sign out">

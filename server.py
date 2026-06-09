@@ -14,12 +14,11 @@ from flask_limiter.util import get_remote_address
 from langchain_core.messages import AIMessageChunk, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from agent.assistant import create_agent
-from agent.file_handler import (
-    is_authenticated, create_web_flow, get_user_profile,
-    _load_credentials, _TOKEN_PATH,
-)
+from agent.file_handler import is_authenticated, create_web_flow, get_user_profile
+from agent.db import init_db, DB_PATH, upsert_user, get_user, list_users
 import anthropic as _anthropic
 from agent.tools import _thread_local as _tools_thread_local
+from agent.tools import current_user_id as _tools_current_user_id
 
 # Only allow OAuth over HTTP on localhost — never in production
 if os.getenv('FLASK_ENV') != 'production':
@@ -49,13 +48,31 @@ limiter = Limiter(
 
 
 def require_auth(f):
-    """Decorator that returns 401 if no valid OAuth token exists."""
+    """Decorator that returns 401 if the session has no valid, connected user."""
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not is_authenticated():
+        user_id = session.get('user_id')
+        if not user_id or not is_authenticated(user_id):
             return jsonify({'error': 'Unauthorized'}), 401
         return f(*args, **kwargs)
     return decorated
+
+
+def require_admin(f):
+    """Decorator that returns 404 (not 403) for non-admins, hiding the feature
+    from regular users entirely."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('is_admin'):
+            return jsonify({'error': 'Not found'}), 404
+        return f(*args, **kwargs)
+    return decorated
+
+
+# Accounts whose Google login email grants admin (creator/staff) access.
+_ADMIN_EMAILS = {
+    e.strip().lower() for e in os.getenv('ADMIN_EMAILS', '').split(',') if e.strip()
+}
 
 # Issue #9: make callback URL configurable for non-local deployments
 _CALLBACK_URL  = os.getenv('OAUTH_CALLBACK_URL', 'http://localhost:5000/auth/callback')
@@ -68,39 +85,13 @@ _OAUTH_STATE_TTL = 600  # 10 minutes
 checkpointer = MemorySaver()
 agent = create_agent(checkpointer=checkpointer)
 
-_DATA_DIR = Path('/data') if Path('/data').exists() else Path(__file__).parent
-_DB_PATH = _DATA_DIR / 'chats.db'
-
-
 def _db():
-    conn = sqlite3.connect(_DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def _init_db():
-    with _db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS chats (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                messages TEXT NOT NULL DEFAULT '[]',
-                thread_id TEXT NOT NULL,
-                created_at REAL NOT NULL DEFAULT (unixepoch('now'))
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS templates (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                subject TEXT NOT NULL DEFAULT '',
-                body TEXT NOT NULL DEFAULT '',
-                created_at REAL NOT NULL DEFAULT (unixepoch('now'))
-            )
-        """)
-
-
-_init_db()
+init_db()
 
 # Issue #6: per-session state instead of a single global.
 # Each session (browser tab / cookie) gets its own lock, thread_id, and state
@@ -171,10 +162,11 @@ def _make_web_input_streaming(rid: str, st: dict, out_queue: queue.Queue):
 
 # ── Non-streaming agent runner (used by /chat) ────────────────────────────────
 
-def _run_agent(user_input: str, rid: str, st: dict) -> None:
+def _run_agent(user_input: str, rid: str, st: dict, user_id: str) -> None:
     # Set the input override on this thread's local storage so tools.py picks it
     # up via _tool_input() without touching the process-wide builtins.input.
     _tools_thread_local.input_fn = _make_web_input(rid, st)
+    _tools_current_user_id.set(user_id)
     try:
         with st['lock']:
             tid = st['thread_id']
@@ -306,8 +298,9 @@ def _process_stream(stream_gen, rid: str, st: dict, out_queue: queue.Queue) -> N
                         out_queue.put({'type': 'quick_replies', 'replies': replies})
 
 
-def _run_agent_streaming(user_input: str, rid: str, st: dict, out_queue: queue.Queue) -> None:
+def _run_agent_streaming(user_input: str, rid: str, st: dict, out_queue: queue.Queue, user_id: str) -> None:
     _tools_thread_local.input_fn = _make_web_input_streaming(rid, st, out_queue)
+    _tools_current_user_id.set(user_id)
     try:
         with st['lock']:
             tid = st['thread_id']
@@ -375,7 +368,8 @@ def _wait_for_agent(st: dict) -> dict:
 
 @app.route('/auth/status')
 def auth_status():
-    return jsonify({'authenticated': is_authenticated()})
+    user_id = session.get('user_id')
+    return jsonify({'authenticated': is_authenticated(user_id)})
 
 
 @app.route('/auth/login')
@@ -422,24 +416,50 @@ def auth_callback():
         flow.fetch_token(authorization_response=request.url, **extra)
     except Exception as e:
         return f'Auth error: {e}', 400
-    with open(_TOKEN_PATH, 'w') as f:
-        f.write(flow.credentials.to_json())
+
+    profile = get_user_profile(flow.credentials)
+    if not profile.get('id'):
+        return 'Auth error: could not retrieve account info from Google.', 400
+
+    upsert_user(
+        profile['id'], profile['email'], profile['name'], profile['picture'],
+        flow.credentials.to_json(),
+    )
+    session.clear()
+    session['user_id'] = profile['id']
+    session['is_admin'] = profile['email'].strip().lower() in _ADMIN_EMAILS
     return redirect(_FRONTEND_URL)
 
 
 @app.route('/auth/logout', methods=['POST'])
 def auth_logout():
-    _TOKEN_PATH.unlink(missing_ok=True)
+    session.clear()
     return jsonify({'ok': True})
 
 
 @app.route('/auth/profile')
+@require_auth
 def auth_profile():
-    try:
-        creds = _load_credentials()
-        return jsonify(get_user_profile(creds))
-    except Exception as e:
-        return jsonify({'error': str(e)}), 401
+    user = get_user(session['user_id'])
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    return jsonify({
+        'name': user['name'],
+        'email': user['email'],
+        'picture': user['picture'],
+        'is_admin': bool(session.get('is_admin')),
+    })
+
+
+# ── Admin routes (hidden from regular users) ──────────────────────────────────
+
+@app.route('/admin/users', methods=['GET'])
+@require_auth
+@require_admin
+def admin_list_users():
+    """Return basic profile info for every connected user. Never includes
+    OAuth credentials or any Gmail content."""
+    return jsonify(list_users())
 
 
 # ── DB routes ─────────────────────────────────────────────────────────────────
@@ -449,7 +469,8 @@ def auth_profile():
 def list_chats():
     with _db() as conn:
         rows = conn.execute(
-            "SELECT id, title FROM chats ORDER BY created_at DESC LIMIT 50"
+            "SELECT id, title FROM chats WHERE user_id = ? ORDER BY created_at DESC LIMIT 50",
+            (session['user_id'],)
         ).fetchall()
     return jsonify([dict(r) for r in rows])
 
@@ -458,7 +479,9 @@ def list_chats():
 @require_auth
 def get_chat(chat_id: str):
     with _db() as conn:
-        row = conn.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM chats WHERE id = ? AND user_id = ?", (chat_id, session['user_id'])
+        ).fetchone()
     if not row:
         return jsonify({'error': 'Not found'}), 404
     data = dict(row)
@@ -472,12 +495,14 @@ def save_chat(chat_id: str):
     body = request.json or {}
     messages = body.get('messages', [])
     title = body.get('title', 'Untitled')
+    user_id = session['user_id']
     with _db() as conn:
         conn.execute("""
-            INSERT INTO chats (id, title, messages, thread_id)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO chats (id, user_id, title, messages, thread_id)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET messages = excluded.messages, title = excluded.title
-        """, (chat_id, title, json.dumps(messages), body.get('thread_id', '')))
+            WHERE chats.user_id = excluded.user_id
+        """, (chat_id, user_id, title, json.dumps(messages), body.get('thread_id', '')))
     return jsonify({'ok': True})
 
 
@@ -485,7 +510,7 @@ def save_chat(chat_id: str):
 @require_auth
 def delete_chat(chat_id: str):
     with _db() as conn:
-        conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+        conn.execute("DELETE FROM chats WHERE id = ? AND user_id = ?", (chat_id, session['user_id']))
     return jsonify({'ok': True})
 
 
@@ -498,8 +523,9 @@ def search_chats():
     pattern = f'%{q}%'
     with _db() as conn:
         rows = conn.execute(
-            "SELECT id, title FROM chats WHERE title LIKE ? OR messages LIKE ? ORDER BY created_at DESC LIMIT 20",
-            (pattern, pattern)
+            "SELECT id, title FROM chats WHERE user_id = ? AND (title LIKE ? OR messages LIKE ?) "
+            "ORDER BY created_at DESC LIMIT 20",
+            (session['user_id'], pattern, pattern)
         ).fetchall()
     return jsonify([dict(r) for r in rows])
 
@@ -511,7 +537,8 @@ def search_chats():
 def list_templates():
     with _db() as conn:
         rows = conn.execute(
-            "SELECT id, name, subject, body FROM templates ORDER BY created_at DESC"
+            "SELECT id, name, subject, body FROM templates WHERE user_id = ? ORDER BY created_at DESC",
+            (session['user_id'],)
         ).fetchall()
     return jsonify([dict(r) for r in rows])
 
@@ -523,8 +550,8 @@ def create_template():
     tid = uuid.uuid4().hex
     with _db() as conn:
         conn.execute(
-            "INSERT INTO templates (id, name, subject, body) VALUES (?, ?, ?, ?)",
-            (tid, body.get('name', 'Untitled'), body.get('subject', ''), body.get('body', ''))
+            "INSERT INTO templates (id, user_id, name, subject, body) VALUES (?, ?, ?, ?, ?)",
+            (tid, session['user_id'], body.get('name', 'Untitled'), body.get('subject', ''), body.get('body', ''))
         )
     return jsonify({'id': tid, 'ok': True})
 
@@ -533,7 +560,7 @@ def create_template():
 @require_auth
 def delete_template(template_id: str):
     with _db() as conn:
-        conn.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+        conn.execute("DELETE FROM templates WHERE id = ? AND user_id = ?", (template_id, session['user_id']))
     return jsonify({'ok': True})
 
 
@@ -550,8 +577,10 @@ _CATEGORY_LABEL = {
 @app.route('/inbox', methods=['GET'])
 @require_auth
 def get_inbox():
-    from agent.tools import _get_service, _fetch_one_headers, URGENT_KEYWORDS
+    from agent.tools import _get_service, _fetch_one_headers, _submit_with_context, URGENT_KEYWORDS
     from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+    _tools_current_user_id.set(session['user_id'])
 
     category = request.args.get('category', '').lower()
     sort_by  = request.args.get('sort', '')
@@ -572,7 +601,7 @@ def get_inbox():
             return jsonify([])
 
         with ThreadPoolExecutor(max_workers=min(len(msg_ids), 10)) as ex:
-            futures = {ex.submit(_fetch_one_headers, mid): mid for mid in msg_ids}
+            futures = {_submit_with_context(ex, _fetch_one_headers, mid): mid for mid in msg_ids}
             emails = [f.result() for f in _as_completed(futures)]
 
         if sort_by == 'priority':
@@ -598,9 +627,13 @@ def chat():
     if not user_input:
         return jsonify({'error': 'Empty message'}), 400
 
+    user_id = session['user_id']
+
     if chat_id:
         with _db() as conn:
-            row = conn.execute("SELECT thread_id FROM chats WHERE id = ?", (chat_id,)).fetchone()
+            row = conn.execute(
+                "SELECT thread_id FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id)
+            ).fetchone()
         if row and row['thread_id']:
             with st['lock']:
                 st['thread_id'] = row['thread_id']
@@ -610,8 +643,8 @@ def chat():
             tid = st['thread_id']
         with _db() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO chats (id, title, messages, thread_id) VALUES (?, ?, ?, ?)",
-                (chat_id, user_input[:60], '[]', tid)
+                "INSERT OR IGNORE INTO chats (id, user_id, title, messages, thread_id) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, user_id, user_input[:60], '[]', tid)
             )
 
     rid = uuid.uuid4().hex
@@ -629,7 +662,7 @@ def chat():
         st['input_event'] = None
         st['stream_queue'] = None
     st['ready'].clear()
-    threading.Thread(target=_run_agent, args=(user_input, rid, st), daemon=True).start()
+    threading.Thread(target=_run_agent, args=(user_input, rid, st, user_id), daemon=True).start()
     result = _wait_for_agent(st)
     result['chat_id'] = chat_id
     with st['lock']:
@@ -650,9 +683,13 @@ def stream_chat():
     if not user_input:
         return jsonify({'error': 'Empty message'}), 400
 
+    user_id = session['user_id']
+
     if chat_id:
         with _db() as conn:
-            row = conn.execute("SELECT thread_id FROM chats WHERE id = ?", (chat_id,)).fetchone()
+            row = conn.execute(
+                "SELECT thread_id FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id)
+            ).fetchone()
         if row and row['thread_id']:
             with st['lock']:
                 st['thread_id'] = row['thread_id']
@@ -662,8 +699,8 @@ def stream_chat():
             tid = st['thread_id']
         with _db() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO chats (id, title, messages, thread_id) VALUES (?, ?, ?, ?)",
-                (chat_id, user_input[:60], '[]', tid)
+                "INSERT OR IGNORE INTO chats (id, user_id, title, messages, thread_id) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, user_id, user_input[:60], '[]', tid)
             )
 
     out_queue: queue.Queue = queue.Queue()
@@ -686,7 +723,7 @@ def stream_chat():
 
     threading.Thread(
         target=_run_agent_streaming,
-        args=(user_input, rid, st, out_queue),
+        args=(user_input, rid, st, out_queue, user_id),
         daemon=True
     ).start()
 
