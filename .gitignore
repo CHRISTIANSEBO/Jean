@@ -16,3 +16,6 @@ __pycache__/
 
 # App data
 conversations/
+
+# Deployment secrets
+railway-variables.json
