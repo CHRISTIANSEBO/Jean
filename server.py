@@ -18,8 +18,8 @@ from agent.file_handler import (
     is_authenticated, create_web_flow, get_user_profile,
     _load_credentials, _TOKEN_PATH,
 )
-import builtins as _builtins
 import anthropic as _anthropic
+from agent.tools import _thread_local as _tools_thread_local
 
 # Only allow OAuth over HTTP on localhost — never in production
 if os.getenv('FLASK_ENV') != 'production':
@@ -161,8 +161,9 @@ def _make_web_input_streaming(rid: str, st: dict, out_queue: queue.Queue):
 # ── Non-streaming agent runner (used by /chat) ────────────────────────────────
 
 def _run_agent(user_input: str, rid: str, st: dict) -> None:
-    original_input = _builtins.input
-    _builtins.input = _make_web_input(rid, st)
+    # Set the input override on this thread's local storage so tools.py picks it
+    # up via _tool_input() without touching the process-wide builtins.input.
+    _tools_thread_local.input_fn = _make_web_input(rid, st)
     try:
         with st['lock']:
             tid = st['thread_id']
@@ -196,7 +197,7 @@ def _run_agent(user_input: str, rid: str, st: dict) -> None:
                 st['error'] = err
                 st['result'] = None
     finally:
-        _builtins.input = original_input
+        _tools_thread_local.input_fn = None
         with st['lock']:
             if st['active_rid'] == rid:
                 st['ready'].set()
@@ -291,8 +292,7 @@ def _process_stream(stream_gen, rid: str, st: dict, out_queue: queue.Queue) -> N
 
 
 def _run_agent_streaming(user_input: str, rid: str, st: dict, out_queue: queue.Queue) -> None:
-    original_input = _builtins.input
-    _builtins.input = _make_web_input_streaming(rid, st, out_queue)
+    _tools_thread_local.input_fn = _make_web_input_streaming(rid, st, out_queue)
     try:
         with st['lock']:
             tid = st['thread_id']
@@ -327,7 +327,7 @@ def _run_agent_streaming(user_input: str, rid: str, st: dict, out_queue: queue.Q
             if st['active_rid'] == rid:
                 out_queue.put({'type': 'error', 'message': err})
     finally:
-        _builtins.input = original_input
+        _tools_thread_local.input_fn = None
         with st['lock']:
             if st['active_rid'] == rid:
                 st['stream_queue'] = None
