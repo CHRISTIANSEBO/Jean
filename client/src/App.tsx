@@ -6,6 +6,7 @@ import Sidebar from './Sidebar';
 import EmailCards from './EmailCards';
 import type { EmailData } from './EmailCards';
 import ComposePanel from './ComposePanel';
+import AdminPanel from './AdminPanel';
 import UnsubView from './UnsubView';
 import InboxLoader from './InboxLoader';
 import LoginPage from './LoginPage';
@@ -137,6 +138,7 @@ export default function App() {
   const [unsubView, setUnsubView]               = useState<UnsubViewState | null>(null);
   const [isAuthenticated, setIsAuthenticated]   = useState<boolean | null>(null);
   const [profile, setProfile]                   = useState<UserProfile | null>(null);
+  const [adminOpen, setAdminOpen]               = useState(false);
 
   const chatIdRef       = useRef<string | null>(null);
   const threadIdRef     = useRef<string | null>(null);
@@ -161,7 +163,10 @@ export default function App() {
         setIsAuthenticated(d.authenticated);
         if (d.authenticated) {
           fetch('/auth/profile').then(r => r.json()).then(p => {
-            if (!p.error) setProfile(p);
+            if (!p.error) {
+              setProfile(p);
+              if (p.is_admin) setAdminOpen(true);
+            }
           }).catch(() => {});
         }
       })
@@ -511,6 +516,7 @@ export default function App() {
         onCompose={() => { setComposeOpen(true); setMobileSidebarOpen(false); }}
         profile={profile}
         onSignOut={signOut}
+        onOpenAdmin={() => { setAdminOpen(true); setMobileSidebarOpen(false); }}
         templates={templates}
         onUseTemplate={(t) => { useTemplate(t); setMobileSidebarOpen(false); }}
         onDeleteTemplate={deleteTemplate}
@@ -527,6 +533,9 @@ export default function App() {
           <DarkVeil speed={0.5} />
         </div>
 
+        {adminOpen ? (
+          <AdminPanel onClose={() => setAdminOpen(false)} />
+        ) : (
         <div className="chat-area">
           <button
             type="button"
@@ -712,6 +721,7 @@ export default function App() {
             </>
           )}
         </div>
+        )}
       </main>
     </div>
   );

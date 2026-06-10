@@ -10,3 +10,4 @@ pytest
 flask
 flask-limiter
 gunicorn
+cryptography

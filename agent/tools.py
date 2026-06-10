@@ -2,19 +2,34 @@
 from langchain.tools import tool
 from email.mime.text import MIMEText
 import base64
+import contextvars
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from googleapiclient.discovery import build as _build_service
-from agent.file_handler import _load_credentials
+from agent.file_handler import load_credentials_for_user
 
 _thread_local = threading.local()
 
+# Identifies which user's Gmail account the current request is acting on.
+# Set per-request (web) or left as None for the single-user CLI (main.py).
+current_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar('current_user_id', default=None)
+
+
+def _submit_with_context(executor: ThreadPoolExecutor, fn, *args):
+    """Submit to a ThreadPoolExecutor while preserving the current contextvars
+    (e.g. current_user_id), which worker threads do not inherit by default."""
+    ctx = contextvars.copy_context()
+    return executor.submit(ctx.run, fn, *args)
+
+
 def _get_service():
-    """Return a thread-local Gmail service, loading credentials on first call."""
-    if not hasattr(_thread_local, 'service'):
-        _thread_local.service = _build_service('gmail', 'v1', credentials=_load_credentials())
-    return _thread_local.service
+    """Build a Gmail service for the current request's user.
+
+    Credentials are re-resolved (and refreshed if needed) on each call rather
+    than cached, so concurrent requests for different users never share state."""
+    creds = load_credentials_for_user(current_user_id.get())
+    return _build_service('gmail', 'v1', credentials=creds, cache_discovery=False)
 
 
 def _tool_input(prompt: str = '') -> str:
@@ -93,7 +108,7 @@ def _fetch_emails(max_results: int = 10) -> list:
     if not msg_ids:
         return []
     with ThreadPoolExecutor(max_workers=min(len(msg_ids), 10)) as executor:
-        futures = {executor.submit(_fetch_one, mid): mid for mid in msg_ids}
+        futures = {_submit_with_context(executor, _fetch_one, mid): mid for mid in msg_ids}
         return [f.result() for f in as_completed(futures)]
 
 
@@ -104,7 +119,7 @@ def _fetch_email_headers(max_results: int = 10) -> list:
     if not msg_ids:
         return []
     with ThreadPoolExecutor(max_workers=min(len(msg_ids), 10)) as executor:
-        futures = {executor.submit(_fetch_one_headers, mid): mid for mid in msg_ids}
+        futures = {_submit_with_context(executor, _fetch_one_headers, mid): mid for mid in msg_ids}
         return [f.result() for f in as_completed(futures)]
 
 
@@ -126,7 +141,7 @@ def read_email(category: str = ''):
     if not msg_ids:
         return []
     with ThreadPoolExecutor(max_workers=min(len(msg_ids), 10)) as executor:
-        futures = {executor.submit(_fetch_one_headers, mid): mid for mid in msg_ids}
+        futures = {_submit_with_context(executor, _fetch_one_headers, mid): mid for mid in msg_ids}
         return [f.result() for f in as_completed(futures)]
 
 # Define a tool to send an email using Gmail
@@ -272,13 +287,13 @@ def open_email(sender_email: str, subject_hint: str = ''):
 @tool
 def save_template(name: str, subject: str, body: str):
     """Save an email as a reusable template so the user can send it again later."""
-    import sqlite3 as _sqlite3, uuid as _uuid
-    from pathlib import Path as _Path
-    db_path = _Path(__file__).parent.parent / 'chats.db'
+    import uuid as _uuid
+    from agent.db import get_connection
+    user_id = current_user_id.get() or ''
     tid = _uuid.uuid4().hex
-    with _sqlite3.connect(db_path) as conn:
+    with get_connection() as conn:
         conn.execute(
-            "INSERT INTO templates (id, name, subject, body) VALUES (?, ?, ?, ?)",
-            (tid, name, subject, body)
+            "INSERT INTO templates (id, user_id, name, subject, body) VALUES (?, ?, ?, ?, ?)",
+            (tid, user_id, name, subject, body)
         )
     return f"Template '{name}' saved. Ask me to use the '{name}' template any time."

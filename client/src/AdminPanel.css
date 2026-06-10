@@ -1,0 +1,98 @@
+.admin-view {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  width: 100%;
+  overflow-y: auto;
+  padding: 32px 48px 24px;
+  scrollbar-width: none;
+}
+.admin-view::-webkit-scrollbar { display: none; }
+
+.admin-view-hdr {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.admin-back-btn {
+  margin-left: auto;
+  padding: 7px 16px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.admin-back-btn:hover { background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.9); }
+
+.admin-error { color: rgba(255, 110, 110, 0.85); }
+
+.admin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 640px;
+}
+
+.admin-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: background 0.15s;
+}
+.admin-row:hover { background: rgba(255, 255, 255, 0.06); }
+
+.admin-avatar-wrap {
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(140, 80, 240, 0.2);
+}
+.admin-avatar-img { width: 100%; height: 100%; object-fit: cover; }
+.admin-avatar-initials { font-size: 14px; font-weight: 600; color: rgba(190, 150, 255, 0.95); }
+
+.admin-row-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.admin-row-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.88);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.admin-row-email {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-row-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.3);
+  gap: 2px;
+}
