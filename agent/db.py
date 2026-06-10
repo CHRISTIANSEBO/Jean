@@ -21,6 +21,12 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    cols = {row['name'] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
 def init_db() -> None:
     with get_connection() as conn:
         conn.execute("""
@@ -44,6 +50,7 @@ def init_db() -> None:
                 created_at REAL NOT NULL DEFAULT (unixepoch('now'))
             )
         """)
+        _add_column_if_missing(conn, 'chats', 'user_id', "user_id TEXT NOT NULL DEFAULT ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chats_user ON chats(user_id)")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS templates (
@@ -55,6 +62,7 @@ def init_db() -> None:
                 created_at REAL NOT NULL DEFAULT (unixepoch('now'))
             )
         """)
+        _add_column_if_missing(conn, 'templates', 'user_id', "user_id TEXT NOT NULL DEFAULT ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_templates_user ON templates(user_id)")
 
 
