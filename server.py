@@ -47,6 +47,18 @@ limiter = Limiter(
 )
 
 
+@app.before_request
+def _csrf_protect():
+    """Reject state-changing requests that lack our custom header.
+
+    Cross-origin HTML forms cannot set custom headers, so requiring one on
+    every mutating request blocks CSRF even in cases SameSite=Lax does not
+    cover. The frontend sends X-Requested-With: fetch on all such calls."""
+    if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        if request.headers.get('X-Requested-With') != 'fetch':
+            return jsonify({'error': 'Missing required header'}), 403
+
+
 def require_auth(f):
     """Decorator that returns 401 if the session has no valid, connected user."""
     @wraps(f)
@@ -58,21 +70,32 @@ def require_auth(f):
     return decorated
 
 
+# Accounts whose Google login email grants admin (creator/staff) access.
+_ADMIN_EMAILS = {
+    e.strip().lower() for e in os.getenv('ADMIN_EMAILS', '').split(',') if e.strip()
+}
+
+
+def _is_admin() -> bool:
+    """Check the logged-in user's email against ADMIN_EMAILS on every call,
+    so removing an email from the list revokes access immediately instead of
+    persisting until the session expires."""
+    user_id = session.get('user_id')
+    if not user_id:
+        return False
+    user = get_user(user_id)
+    return bool(user) and user['email'].strip().lower() in _ADMIN_EMAILS
+
+
 def require_admin(f):
     """Decorator that returns 404 (not 403) for non-admins, hiding the feature
     from regular users entirely."""
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get('is_admin'):
+        if not _is_admin():
             return jsonify({'error': 'Not found'}), 404
         return f(*args, **kwargs)
     return decorated
-
-
-# Accounts whose Google login email grants admin (creator/staff) access.
-_ADMIN_EMAILS = {
-    e.strip().lower() for e in os.getenv('ADMIN_EMAILS', '').split(',') if e.strip()
-}
 
 # Issue #9: make callback URL configurable for non-local deployments
 _CALLBACK_URL  = os.getenv('OAUTH_CALLBACK_URL', 'http://localhost:5000/auth/callback')
@@ -96,6 +119,7 @@ init_db()
 # so concurrent users/requests don't clobber each other.
 _sessions: dict[str, dict] = {}
 _sessions_meta_lock = threading.Lock()
+_SESSION_IDLE_TTL = 2 * 3600  # evict session state after 2h of inactivity
 
 
 def _get_session_state() -> dict:
@@ -104,7 +128,15 @@ def _get_session_state() -> dict:
     if not sid:
         sid = uuid.uuid4().hex
         session['sid'] = sid
+    now = time.time()
     with _sessions_meta_lock:
+        # Evict idle sessions so the dict doesn't grow without bound. A new
+        # bucket (with a fresh thread_id) is created transparently if the same
+        # browser comes back later.
+        stale = [k for k, v in _sessions.items()
+                 if now - v.get('last_seen', now) > _SESSION_IDLE_TTL]
+        for k in stale:
+            _sessions.pop(k, None)
         if sid not in _sessions:
             _sessions[sid] = {
                 'lock': threading.Lock(),
@@ -120,7 +152,9 @@ def _get_session_state() -> dict:
                 'error': None,
                 'stream_queue': None,
             }
-        return _sessions[sid]
+        st = _sessions[sid]
+        st['last_seen'] = now
+        return st
 
 
 # ── Non-streaming input override (used by /chat) ──────────────────────────────
@@ -368,6 +402,50 @@ def _wait_for_agent(st: dict) -> dict:
     return {'type': 'message', 'reply': 'Request timed out. Please try again.'}
 
 
+def _resolve_chat(st: dict, chat_id: str | None, user_id: str, user_input: str) -> str:
+    """Bind this session to an existing chat's agent thread, or create a new
+    chat row for a fresh conversation. Returns the chat id."""
+    if chat_id:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT thread_id FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id)
+            ).fetchone()
+        if row and row['thread_id']:
+            with st['lock']:
+                st['thread_id'] = row['thread_id']
+        return chat_id
+    chat_id = uuid.uuid4().hex
+    with st['lock']:
+        tid = st['thread_id']
+    with _db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO chats (id, user_id, title, messages, thread_id) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, user_id, user_input[:60], '[]', tid)
+        )
+    return chat_id
+
+
+def _begin_request(st: dict, stream_queue: queue.Queue | None) -> str:
+    """Cancel any pending confirmation, reset per-request state, and return a
+    fresh request id that marks this request as the session's active one."""
+    rid = uuid.uuid4().hex
+    with st['lock']:
+        old_event = st['input_event']
+        if old_event and not old_event.is_set():
+            st['input_response'] = 'n'
+            st['input_event'] = None
+            st['thread_id'] = f"web-{uuid.uuid4().hex}"
+            old_event.set()
+        st['active_rid'] = rid
+        st['result'] = None
+        st['error'] = None
+        st['pending_prompt'] = None
+        st['input_event'] = None
+        st['stream_queue'] = stream_queue
+    st['ready'].clear()
+    return rid
+
+
 # ── Auth routes ───────────────────────────────────────────────────────────────
 
 @app.route('/auth/status')
@@ -429,7 +507,6 @@ def auth_callback():
     )
     session.clear()
     session['user_id'] = profile['id']
-    session['is_admin'] = profile['email'].strip().lower() in _ADMIN_EMAILS
     return redirect(_FRONTEND_URL)
 
 
@@ -449,7 +526,7 @@ def auth_profile():
         'name': user['name'],
         'email': user['email'],
         'picture': user['picture'],
-        'is_admin': bool(session.get('is_admin')),
+        'is_admin': _is_admin(),
     })
 
 
@@ -576,19 +653,12 @@ def delete_template(template_id: str):
 
 # ── Direct inbox fetch (bypasses Jean for speed) ──────────────────────────────
 
-_CATEGORY_LABEL = {
-    'primary':    'CATEGORY_PERSONAL',
-    'promotions': 'CATEGORY_PROMOTIONS',
-    'social':     'CATEGORY_SOCIAL',
-    'updates':    'CATEGORY_UPDATES',
-    'forums':     'CATEGORY_FORUMS',
-}
-
 @app.route('/inbox', methods=['GET'])
 @require_auth
 @limiter.limit("10 per minute")
 def get_inbox():
-    from agent.tools import _get_service, _fetch_one_headers, _submit_with_context, URGENT_KEYWORDS
+    from agent.tools import (_get_service, _fetch_one_headers, _submit_with_context,
+                             URGENT_KEYWORDS, _CATEGORY_LABEL)
     from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed, TimeoutError as _FutureTimeoutError
 
     _tools_current_user_id.set(session['user_id'])
@@ -626,8 +696,9 @@ def get_inbox():
             emails.sort(key=lambda e: e['priority'], reverse=True)
 
         return jsonify(emails)
-    except Exception as exc:
-        return jsonify({'error': str(exc)}), 500
+    except Exception:
+        app.logger.exception("Inbox fetch failed")
+        return jsonify({'error': 'Failed to load inbox. Please try again.'}), 500
 
 
 # ── Non-streaming chat (used by main.py terminal REPL) ───────────────────────
@@ -644,40 +715,8 @@ def chat():
         return jsonify({'error': 'Empty message'}), 400
 
     user_id = session['user_id']
-
-    if chat_id:
-        with _db() as conn:
-            row = conn.execute(
-                "SELECT thread_id FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id)
-            ).fetchone()
-        if row and row['thread_id']:
-            with st['lock']:
-                st['thread_id'] = row['thread_id']
-    else:
-        chat_id = uuid.uuid4().hex
-        with st['lock']:
-            tid = st['thread_id']
-        with _db() as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO chats (id, user_id, title, messages, thread_id) VALUES (?, ?, ?, ?, ?)",
-                (chat_id, user_id, user_input[:60], '[]', tid)
-            )
-
-    rid = uuid.uuid4().hex
-    with st['lock']:
-        old_event = st['input_event']
-        if old_event and not old_event.is_set():
-            st['input_response'] = 'n'
-            st['input_event'] = None
-            st['thread_id'] = f"web-{uuid.uuid4().hex}"
-            old_event.set()
-        st['active_rid'] = rid
-        st['result'] = None
-        st['error'] = None
-        st['pending_prompt'] = None
-        st['input_event'] = None
-        st['stream_queue'] = None
-    st['ready'].clear()
+    chat_id = _resolve_chat(st, chat_id, user_id, user_input)
+    rid = _begin_request(st, stream_queue=None)
     threading.Thread(target=_run_agent, args=(user_input, rid, st, user_id), daemon=True).start()
     result = _wait_for_agent(st)
     result['chat_id'] = chat_id
@@ -700,42 +739,10 @@ def stream_chat():
         return jsonify({'error': 'Empty message'}), 400
 
     user_id = session['user_id']
-
-    if chat_id:
-        with _db() as conn:
-            row = conn.execute(
-                "SELECT thread_id FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id)
-            ).fetchone()
-        if row and row['thread_id']:
-            with st['lock']:
-                st['thread_id'] = row['thread_id']
-    else:
-        chat_id = uuid.uuid4().hex
-        with st['lock']:
-            tid = st['thread_id']
-        with _db() as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO chats (id, user_id, title, messages, thread_id) VALUES (?, ?, ?, ?, ?)",
-                (chat_id, user_id, user_input[:60], '[]', tid)
-            )
+    chat_id = _resolve_chat(st, chat_id, user_id, user_input)
 
     out_queue: queue.Queue = queue.Queue()
-    rid = uuid.uuid4().hex
-
-    with st['lock']:
-        old_event = st['input_event']
-        if old_event and not old_event.is_set():
-            st['input_response'] = 'n'
-            st['input_event'] = None
-            st['thread_id'] = f"web-{uuid.uuid4().hex}"
-            old_event.set()
-        st['active_rid'] = rid
-        st['result'] = None
-        st['error'] = None
-        st['pending_prompt'] = None
-        st['input_event'] = None
-        st['stream_queue'] = out_queue
-    st['ready'].clear()
+    rid = _begin_request(st, stream_queue=out_queue)
 
     threading.Thread(
         target=_run_agent_streaming,
