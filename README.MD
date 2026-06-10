@@ -24,7 +24,12 @@ It's a full multi-user web app: sign in with Google, and your Gmail tokens are e
 
 > **▶ [Open the interactive demo](https://htmlpreview.github.io/?https://github.com/CHRISTIANSEBO/email-assistant/blob/master/demo/index.html)** — a self-contained, no-backend walkthrough that replays a real Jean conversation (reading the inbox → email cards → opening a message → quick replies → sending), right in your browser. No sign-in, no real inbox.
 
-To run the demo locally, just open `demo/index.html` in any browser.
+To run the demo locally, just open `demo/index.html` in any browser. To turn it
+into a video (`.mp4`/`.gif`) with one command, see [`demo/README.md`](demo/README.md):
+
+```bash
+cd demo && npm install && npx playwright install chromium && node record.mjs
+```
 
 ![Jean in action](demo/research-agent-gif.gif)
 
