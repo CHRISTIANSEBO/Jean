@@ -78,8 +78,6 @@ _ADMIN_EMAILS = {
 _CALLBACK_URL  = os.getenv('OAUTH_CALLBACK_URL', 'http://localhost:5000/auth/callback')
 _FRONTEND_URL  = os.getenv('FRONTEND_URL', 'http://localhost:5173')
 
-# Issue #7: store (code_verifier, expiry_timestamp) so stale states can be pruned
-_oauth_states: dict[str, tuple[str | None, float]] = {}
 _OAUTH_STATE_TTL = 600  # 10 minutes
 
 checkpointer = MemorySaver()
@@ -110,7 +108,9 @@ def _get_session_state() -> dict:
         if sid not in _sessions:
             _sessions[sid] = {
                 'lock': threading.Lock(),
-                'thread_id': f"web-{sid[:8]}",
+                # Full 128-bit random id: thread_id is the only key guarding the
+                # shared checkpointer, so it must not be guessable.
+                'thread_id': f"web-{uuid.uuid4().hex}",
                 'active_rid': None,
                 'pending_prompt': None,
                 'input_event': None,
@@ -178,7 +178,7 @@ def _run_agent(user_input: str, rid: str, st: dict, user_id: str) -> None:
         except ValueError as e:
             if 'INVALID_CHAT_HISTORY' not in str(e):
                 raise
-            new_tid = f"web-{uuid.uuid4().hex[:8]}"
+            new_tid = f"web-{uuid.uuid4().hex}"
             with st['lock']:
                 st['thread_id'] = new_tid
                 tid = new_tid
@@ -319,7 +319,7 @@ def _run_agent_streaming(user_input: str, rid: str, st: dict, out_queue: queue.Q
         except ValueError as e:
             if 'INVALID_CHAT_HISTORY' not in str(e):
                 raise
-            new_tid = f"web-{uuid.uuid4().hex[:8]}"
+            new_tid = f"web-{uuid.uuid4().hex}"
             with st['lock']:
                 st['thread_id'] = new_tid
                 tid = new_tid
@@ -386,12 +386,6 @@ def auth_login():
                      'Set the GOOGLE_CREDENTIALS_B64 environment variable or place credentials.json in the project root.'
         }), 503
 
-    # Prune expired OAuth states before adding a new one (Issue #7)
-    now = time.time()
-    expired = [k for k, (_, exp) in list(_oauth_states.items()) if now > exp]
-    for k in expired:
-        _oauth_states.pop(k, None)
-
     state = secrets.token_urlsafe(16)
     try:
         flow = create_web_flow(_CALLBACK_URL)
@@ -400,21 +394,24 @@ def auth_login():
         )
     except Exception as e:
         return jsonify({'error': f'Failed to create OAuth flow: {e}'}), 503
-    _oauth_states[state] = (getattr(flow, 'code_verifier', None), now + _OAUTH_STATE_TTL)
+    # Bind the state to this browser session so a callback URL minted in one
+    # session can never complete login in another (OAuth login CSRF).
+    session['oauth_state'] = state
+    session['oauth_code_verifier'] = getattr(flow, 'code_verifier', None)
+    session['oauth_expiry'] = time.time() + _OAUTH_STATE_TTL
     return jsonify({'url': auth_url})
 
 
 @app.route('/auth/callback')
 def auth_callback():
     state = request.args.get('state', '')
-    entry = _oauth_states.get(state)
-    if not entry:
+    expected_state = session.pop('oauth_state', None)
+    code_verifier = session.pop('oauth_code_verifier', None)
+    expiry = session.pop('oauth_expiry', 0)
+    if (not state or not expected_state
+            or not secrets.compare_digest(state, expected_state)
+            or time.time() > expiry):
         return 'Invalid or expired auth state.', 400
-    code_verifier, expiry = entry
-    if time.time() > expiry:
-        _oauth_states.pop(state, None)
-        return 'Invalid or expired auth state.', 400
-    _oauth_states.pop(state, None)
     flow = create_web_flow(_CALLBACK_URL)
     try:
         extra = {'code_verifier': code_verifier} if code_verifier else {}
@@ -503,12 +500,16 @@ def save_chat(chat_id: str):
     title = body.get('title', 'Untitled')
     user_id = session['user_id']
     with _db() as conn:
+        # thread_id is intentionally not accepted from the client: agent threads
+        # are shared process-wide, so a client-chosen thread_id would let a user
+        # attach (and later resume) another user's conversation history. Threads
+        # are only ever assigned server-side in /chat and /stream.
         conn.execute("""
             INSERT INTO chats (id, user_id, title, messages, thread_id)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, '')
             ON CONFLICT(id) DO UPDATE SET messages = excluded.messages, title = excluded.title
             WHERE chats.user_id = excluded.user_id
-        """, (chat_id, user_id, title, json.dumps(messages), body.get('thread_id', '')))
+        """, (chat_id, user_id, title, json.dumps(messages)))
     return jsonify({'ok': True})
 
 
@@ -668,7 +669,7 @@ def chat():
         if old_event and not old_event.is_set():
             st['input_response'] = 'n'
             st['input_event'] = None
-            st['thread_id'] = f"web-{uuid.uuid4().hex[:8]}"
+            st['thread_id'] = f"web-{uuid.uuid4().hex}"
             old_event.set()
         st['active_rid'] = rid
         st['result'] = None
@@ -726,7 +727,7 @@ def stream_chat():
         if old_event and not old_event.is_set():
             st['input_response'] = 'n'
             st['input_event'] = None
-            st['thread_id'] = f"web-{uuid.uuid4().hex[:8]}"
+            st['thread_id'] = f"web-{uuid.uuid4().hex}"
             old_event.set()
         st['active_rid'] = rid
         st['result'] = None
