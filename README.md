@@ -2,6 +2,8 @@
 
 # Jean — AI Email Assistant
 
+[![Tests](https://github.com/CHRISTIANSEBO/Jean/actions/workflows/tests.yml/badge.svg)](https://github.com/CHRISTIANSEBO/Jean/actions/workflows/tests.yml)
+
 **Talk to your inbox.** Jean reads, sorts, drafts, sends, and unsubscribes from your Gmail — all through a conversational chat interface powered by Claude.
 
 [Features](#features) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Deployment](#deployment)
