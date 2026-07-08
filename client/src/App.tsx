@@ -14,110 +14,13 @@ import type { UnsubSender } from './UnsubView';
 import type { UserProfile } from './Sidebar';
 import type { TemplateItem, RecentChat } from './StaggeredMenu';
 import './App.css';
+import { triggerConfetti } from './utils/confetti';
+import { parseMarkdown } from './utils/markdown';
+import {
+  TOOL_LABELS, QUICK_ACTIONS, INBOX_LABELS, CSRF_HEADER,
+  type Message, type InboxView, type UnsubViewState, type Confirmation,
+} from './constants';
 
-// ── Confetti ──────────────────────────────────────────────────────────────────
-function triggerConfetti() {
-  const canvas = document.createElement('canvas');
-  canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:9999;';
-  document.body.appendChild(canvas);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) { canvas.remove(); return; }
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-  const colors = ['#8c50f0', '#a78bfa', '#06b6d4', '#10b981', '#f59e0b', '#ec4899', '#fff'];
-  const particles = Array.from({ length: 90 }, () => ({
-    x: Math.random() * canvas.width, y: Math.random() * canvas.height * 0.35 - 10,
-    vx: (Math.random() - 0.5) * 5, vy: Math.random() * 3 + 1,
-    color: colors[Math.floor(Math.random() * colors.length)],
-    w: Math.random() * 9 + 4, h: Math.random() * 5 + 3,
-    angle: Math.random() * Math.PI * 2, spin: (Math.random() - 0.5) * 0.18, opacity: 1,
-  }));
-  let raf: number;
-  const tick = () => {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    let alive = false;
-    for (const p of particles) {
-      p.x += p.vx; p.y += p.vy; p.vy += 0.12; p.angle += p.spin; p.opacity -= 0.007;
-      if (p.opacity > 0 && p.y < canvas.height + 20) alive = true;
-      ctx.save(); ctx.globalAlpha = Math.max(0, p.opacity);
-      ctx.translate(p.x, p.y); ctx.rotate(p.angle);
-      ctx.fillStyle = p.color; ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
-      ctx.restore();
-    }
-    if (alive) raf = requestAnimationFrame(tick); else canvas.remove();
-  };
-  raf = requestAnimationFrame(tick);
-  setTimeout(() => { cancelAnimationFrame(raf); canvas.remove(); }, 4500);
-}
-
-// ── Types ─────────────────────────────────────────────────────────────────────
-type Message = { role: 'user' | 'assistant'; text: string; emails?: EmailData[]; quickReplies?: string[] };
-type InboxView = { label: string; emails: EmailData[]; loading: boolean };
-type UnsubViewState = { senders: UnsubSender[]; loading: boolean };
-type Confirmation = { prompt: string };
-
-const TOOL_LABELS: Record<string, string> = {
-  read_email: 'Reading your inbox...',
-  sort_emails: 'Sorting emails by priority...',
-  open_email: 'Opening email...',
-  send_email: 'Preparing to send...',
-  summarize_email: 'Summarizing email...',
-  unsubscribe_from_email: 'Processing unsubscribe...',
-  save_template: 'Saving template...',
-};
-
-const QUICK_ACTIONS = ['Read inbox', 'Sort by priority', 'Check promotions', 'Unsubscribe'];
-
-const INBOX_LABELS: Record<string, string> = {
-  primary: 'Primary',
-  promotions: 'Promotions',
-  social: 'Social',
-  updates: 'Updates',
-  sort: 'Priority',
-};
-
-// Cross-origin pages can't set custom headers, so the server requires this one
-// on every state-changing request as CSRF protection.
-const CSRF_HEADER = { 'X-Requested-With': 'fetch' };
-
-function parseMarkdown(text: string): string {
-  function esc(s: string) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
-  function inline(s: string) {
-    return s.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`)
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
-  }
-  const lines = text.split('\n'); const out: string[] = []; let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    if (line.trim().startsWith('```')) {
-      const cl: string[] = []; i++;
-      while (i < lines.length && !lines[i].trim().startsWith('```')) { cl.push(esc(lines[i])); i++; }
-      i++; out.push(`<pre><code>${cl.join('\n')}</code></pre>`); continue;
-    }
-    const hm = line.match(/^(#{1,3}) (.+)/);
-    if (hm) { out.push(`<h${hm[1].length}>${inline(esc(hm[2]))}</h${hm[1].length}>`); i++; continue; }
-    if (/^[-*] /.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length && /^[-*] /.test(lines[i])) { items.push(`<li>${inline(esc(lines[i].replace(/^[-*] /, '')))}</li>`); i++; }
-      out.push(`<ul>${items.join('')}</ul>`); continue;
-    }
-    if (/^\d+\. /.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length && /^\d+\. /.test(lines[i])) { items.push(`<li>${inline(esc(lines[i].replace(/^\d+\. /, '')))}</li>`); i++; }
-      out.push(`<ol>${items.join('')}</ol>`); continue;
-    }
-    if (line.trim() === '') { i++; continue; }
-    const pl: string[] = [];
-    while (i < lines.length && lines[i].trim() !== '' && !/^[-*] /.test(lines[i]) && !/^\d+\. /.test(lines[i]) && !/^#{1,3} /.test(lines[i]) && !lines[i].trim().startsWith('```')) {
-      pl.push(inline(esc(lines[i]))); i++;
-    }
-    if (pl.length) out.push(`<p>${pl.join('<br>')}</p>`);
-  }
-  return out.join('');
-}
-
-// ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
   const [messages, setMessages]               = useState<Message[]>([]);
   const [input, setInput]                     = useState('');
