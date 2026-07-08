@@ -11,9 +11,9 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      ANTHROPIC_API_KEY: ***
-      OPENAI_API_KEY: ***
-      ADMIN_EMAILS: admin@example.com
+      ANTHROPIC_API_KEY: "dummy-anthropic-key-for-tests"
+      OPENAI_API_KEY: "dummy-openai-key-for-tests"
+      ADMIN_EMAILS: "admin@example.com"
 
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +27,8 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Generate test Fernet key
-        run: echo "FERNET_KEY=*** -c 'import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())')" >> "$GITHUB_ENV"
+        run: |
+          echo "FERNET_KEY=$(python -c 'import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')" >> "$GITHUB_ENV"
 
       - name: Run tests
         run: python -m pytest tests/ -v
