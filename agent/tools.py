@@ -329,14 +329,41 @@ def open_email(sender_email: str, subject_hint: str = ''):
 
     query = f'from:{sender_email}'
     if subject_hint:
-        query += f' subject:{subject_hint}'
-    results = _get_service().users().messages().list(userId='me', q=query, maxResults=1).execute()
-    messages = results.get('messages', [])
+        # Quote the hint so a multi-word subject (e.g. "Manor Lords on sale")
+        # is treated as one subject filter instead of loose search terms.
+        safe_hint = subject_hint.replace('"', '')
+        query += f' subject:"{safe_hint}"'
+
+    # Locate the message. Gmail API calls can fail transiently (network, auth
+    # refresh, rate limits); return a friendly message instead of raising, which
+    # otherwise surfaces to the user as a generic "something went wrong".
+    try:
+        results = _get_service().users().messages().list(userId='me', q=query, maxResults=1).execute()
+        messages = results.get('messages', [])
+    except Exception as e:
+        return f"Couldn't reach Gmail to find that email ({type(e).__name__}). Please try again in a moment."
 
     if not messages:
-        return f"No emails found from {sender_email}."
+        # Retry once without the subject filter — the hint may not match Gmail's
+        # subject tokenization even though the email exists.
+        if subject_hint:
+            try:
+                results = _get_service().users().messages().list(
+                    userId='me', q=f'from:{sender_email}', maxResults=1
+                ).execute()
+                messages = results.get('messages', [])
+            except Exception as e:
+                return f"Couldn't reach Gmail to find that email ({type(e).__name__}). Please try again in a moment."
+        if not messages:
+            return f"No emails found from {sender_email}."
 
-    msg_data = _get_service().users().messages().get(userId='me', id=messages[0]['id'], format='full').execute()
+    try:
+        msg_data = _get_service().users().messages().get(
+            userId='me', id=messages[0]['id'], format='full'
+        ).execute()
+    except Exception as e:
+        return f"Couldn't open that email from {sender_email} ({type(e).__name__}). Please try again in a moment."
+
     headers = msg_data['payload']['headers']
     subject = _header(headers, 'Subject', '(no subject)')
     sender = _header(headers, 'From', '(unknown)')
@@ -345,7 +372,10 @@ def open_email(sender_email: str, subject_hint: str = ''):
     if confirm != 'y':
         return "User declined to open the email."
 
-    body = _extract_body(msg_data['payload'])
+    try:
+        body = _extract_body(msg_data['payload'])
+    except Exception as e:
+        return f"Opened the email but couldn't parse its body ({type(e).__name__})."
     if len(body) > 3000:
         body = body[:3000] + "\n... [truncated]"
     return (
