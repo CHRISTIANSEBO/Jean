@@ -132,6 +132,81 @@ class TestSummarizeEmail:
 
 
 # ---------------------------------------------------------------------------
+# open_email — error handling + query robustness
+# ---------------------------------------------------------------------------
+
+class TestOpenEmail:
+    def _service_with(self, list_result=None, get_result=None, list_side_effect=None):
+        svc = MagicMock()
+        if list_side_effect is not None:
+            svc.users().messages().list().execute.side_effect = list_side_effect
+        else:
+            svc.users().messages().list().execute.return_value = list_result or {"messages": []}
+        if get_result is not None:
+            svc.users().messages().get().execute.return_value = get_result
+        return svc
+
+    def test_invalid_sender_rejected(self):
+        from agent.tools import open_email
+        result = open_email.invoke({"sender_email": "not-an-email"})
+        assert "Invalid" in result
+
+    def test_gmail_list_failure_returns_friendly_message(self):
+        # The reported bug: a Gmail hiccup raised and surfaced as a generic error.
+        # It must now return a friendly, non-raising message.
+        svc = self._service_with(list_side_effect=RuntimeError("boom"))
+        with patch("agent.tools._get_service", return_value=svc):
+            from agent.tools import open_email
+            result = open_email.invoke({"sender_email": "store@steampowered.com"})
+        assert "try again" in result.lower()
+        assert "RuntimeError" in result
+
+    def test_no_emails_found(self):
+        svc = self._service_with(list_result={"messages": []})
+        with patch("agent.tools._get_service", return_value=svc):
+            from agent.tools import open_email
+            result = open_email.invoke({"sender_email": "store@steampowered.com"})
+        assert "No emails found" in result
+
+    def test_successful_open_returns_body(self):
+        get_result = {
+            "payload": {
+                "mimeType": "text/plain",
+                "body": {"data": _b64("Manor Lords is 20% off!")},
+                "headers": [
+                    {"name": "Subject", "value": "Manor Lords on sale"},
+                    {"name": "From", "value": "store@steampowered.com"},
+                ],
+            }
+        }
+        svc = self._service_with(list_result={"messages": [{"id": "1"}]}, get_result=get_result)
+        with patch("agent.tools._get_service", return_value=svc), \
+             patch("builtins.input", return_value="y"):
+            from agent.tools import open_email
+            result = open_email.invoke({
+                "sender_email": "store@steampowered.com",
+                "subject_hint": "Manor Lords on sale",
+            })
+        assert "Manor Lords is 20% off!" in result
+        assert "Subject: Manor Lords on sale" in result
+
+    def test_user_declines_open(self):
+        get_result = {
+            "payload": {
+                "mimeType": "text/plain",
+                "body": {"data": _b64("secret")},
+                "headers": [{"name": "Subject", "value": "Hi"}, {"name": "From", "value": "a@b.com"}],
+            }
+        }
+        svc = self._service_with(list_result={"messages": [{"id": "1"}]}, get_result=get_result)
+        with patch("agent.tools._get_service", return_value=svc), \
+             patch("builtins.input", return_value="n"):
+            from agent.tools import open_email
+            result = open_email.invoke({"sender_email": "a@b.com"})
+        assert result == "User declined to open the email."
+
+
+# ---------------------------------------------------------------------------
 # send_email — email validation
 # ---------------------------------------------------------------------------
 

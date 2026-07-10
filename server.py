@@ -328,7 +328,10 @@ def _process_stream(stream_gen, rid: str, st: dict, out_queue: queue.Queue) -> N
             # Quick reply suggestions after opening a full email
             if tool_name == 'open_email':
                 content = chunk.content or ''
-                if isinstance(content, str) and 'Body:' in content:
+                # open_email returns the body under a "Body (UNTRUSTED..." header;
+                # summarize_email uses "Body:". Match either so quick replies fire
+                # after a real email is opened (but not on error strings).
+                if isinstance(content, str) and ('Body:' in content or 'Body (' in content):
                     replies = _generate_quick_replies(content)
                     if replies:
                         out_queue.put({'type': 'quick_replies', 'replies': replies})
