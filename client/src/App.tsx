@@ -435,6 +435,8 @@ export default function App() {
         onSignOut={signOut}
         onOpenAdmin={() => { setAdminOpen(true); setMobileSidebarOpen(false); }}
         templates={templates}
+        // useTemplate is a plain handler, not a React hook (eslint mis-flags the `use` prefix).
+        // eslint-disable-next-line react-hooks/rules-of-hooks
         onUseTemplate={(t) => { useTemplate(t); setMobileSidebarOpen(false); }}
         onDeleteTemplate={deleteTemplate}
         recentChats={recentChats}
