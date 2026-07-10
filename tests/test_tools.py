@@ -18,7 +18,7 @@ def _b64(text: str) -> str:
 
 # Import after patching authenticate_gmail so the module loads without OAuth
 with patch("agent.file_handler.authenticate_gmail", return_value=MagicMock()):
-    from agent.tools import _extract_body, URGENT_KEYWORDS
+    from agent.tools import _extract_body, _html_to_text, URGENT_KEYWORDS
 
 
 class TestExtractBody:
@@ -37,13 +37,14 @@ class TestExtractBody:
         assert _extract_body(payload) == "Plain text"
 
     def test_multipart_falls_back_to_html(self):
+        # HTML-only bodies are stripped to readable text (markup removed).
         payload = {
             "mimeType": "multipart/alternative",
             "parts": [
                 {"mimeType": "text/html", "body": {"data": _b64("<b>HTML only</b>")}},
             ],
         }
-        assert _extract_body(payload) == "<b>HTML only</b>"
+        assert _extract_body(payload) == "HTML only"
 
     def test_empty_body_data(self):
         payload = {"mimeType": "text/plain", "body": {"data": ""}}
@@ -62,6 +63,42 @@ class TestExtractBody:
             ],
         }
         assert _extract_body(payload) == "Nested plain"
+
+
+class TestHtmlToText:
+    def test_strips_basic_tags(self):
+        assert _html_to_text("<b>Hello</b> <i>world</i>") == "Hello world"
+
+    def test_drops_script_and_style(self):
+        html = (
+            "<html><head><style>.x{color:red}</style></head>"
+            "<body><p>Visible</p><script>evil()</script></body></html>"
+        )
+        out = _html_to_text(html)
+        assert "Visible" in out
+        assert "evil" not in out
+        assert "color:red" not in out
+
+    def test_block_tags_become_newlines(self):
+        out = _html_to_text("<p>Line one</p><p>Line two</p>")
+        assert "Line one" in out
+        assert "Line two" in out
+        assert "\n" in out
+
+    def test_unescapes_entities(self):
+        assert _html_to_text("Tom &amp; Jerry &lt;3") == "Tom & Jerry <3"
+
+    def test_html_extract_body_strips_markup(self):
+        payload = {
+            "mimeType": "text/html",
+            "body": {"data": _b64("<div>Hi <a href='#'>there</a></div>")},
+        }
+        assert _extract_body(payload) == "Hi there"
+
+    def test_plain_text_is_untouched(self):
+        # A < in plain text must NOT be mangled by HTML parsing.
+        payload = {"mimeType": "text/plain", "body": {"data": _b64("a < b and c > d")}}
+        assert _extract_body(payload) == "a < b and c > d"
 
 
 class TestSummarizeEmail:

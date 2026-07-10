@@ -1,6 +1,7 @@
 # This file defines tools for the email responder agent.
 from langchain.tools import tool
 from email.mime.text import MIMEText
+from html.parser import HTMLParser
 import base64
 import contextvars
 import re
@@ -41,12 +42,69 @@ def _tool_input(prompt: str = '') -> str:
     return input(prompt)
 
 
+class _HTMLTextExtractor(HTMLParser):
+    """Collapse an HTML document into readable plain text.
+
+    Drops <script>/<style> contents entirely, turns block-level tags and <br>
+    into line breaks, and unescapes entities. This keeps email bodies readable
+    for the agent instead of feeding it raw markup (many promo/newsletter
+    emails are HTML-only)."""
+
+    _SKIP = {'script', 'style', 'head', 'title'}
+    _BLOCK = {'p', 'div', 'br', 'tr', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._chunks: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skip_depth += 1
+        elif tag in self._BLOCK:
+            self._chunks.append('\n')
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._skip_depth > 0:
+            self._skip_depth -= 1
+        elif tag in self._BLOCK:
+            self._chunks.append('\n')
+
+    def handle_data(self, data):
+        if self._skip_depth == 0:
+            self._chunks.append(data)
+
+    def get_text(self) -> str:
+        text = ''.join(self._chunks)
+        # Collapse runs of blank lines / trailing whitespace into something tidy.
+        text = re.sub(r'[ \t]+', ' ', text)
+        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+        return text.strip()
+
+
+def _html_to_text(html: str) -> str:
+    """Strip HTML markup to readable plain text. Falls back to the raw string
+    if parsing fails for any reason."""
+    try:
+        parser = _HTMLTextExtractor()
+        parser.feed(html)
+        parser.close()
+        return parser.get_text()
+    except Exception:
+        return html
+
+
 def _extract_body(payload: dict) -> str:
-    """Recursively extract plain-text body from a Gmail message payload."""
+    """Recursively extract plain-text body from a Gmail message payload.
+
+    HTML bodies are stripped to readable text so the agent isn't fed raw markup."""
     mime_type = payload.get('mimeType', '')
     if mime_type in ('text/plain', 'text/html'):
         data = payload.get('body', {}).get('data', '')
-        return base64.urlsafe_b64decode(data + '==').decode('utf-8', errors='replace') if data else ''
+        if not data:
+            return ''
+        decoded = base64.urlsafe_b64decode(data + '==').decode('utf-8', errors='replace')
+        return _html_to_text(decoded) if mime_type == 'text/html' else decoded
     if 'parts' in payload:
         # Prefer text/plain; fall back to text/html; then recurse into nested multipart
         plain = next((p for p in payload['parts'] if p.get('mimeType') == 'text/plain'), None)
